@@ -31,7 +31,8 @@ const toDto = (r: Row) => ({
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024, files: 2 },
+  // Vercel functions reject request bodies over 4.5 MB, so stay under it there.
+  limits: { fileSize: (process.env.VERCEL ? 4 : 15) * 1024 * 1024, files: 2 },
 });
 
 const UUID = /^[0-9a-f-]{36}$/i;
@@ -167,6 +168,8 @@ memories.delete('/:id', async (req, res) => {
     [req.params.id, res.locals.userId],
   );
   if (!rowCount) throw new HttpError(404, 'not found');
+  // Serverless has no background timer (see index.ts), so clean up old deletes here.
+  if (process.env.VERCEL) await purgeDeleted().catch(e => console.error('purge failed:', e.message));
   res.status(204).end();
 });
 
