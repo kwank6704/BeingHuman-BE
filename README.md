@@ -38,7 +38,15 @@ Start the database first (`npm run db:up && npm run seed` in BeingHuman-Database
 
 ## API
 
-Every `/api` request carries `X-User-Id` (the LIFF user id, or a device id). Unknown ids are created on first use.
+Every `/api` request says who is calling, one of:
+
+- `Authorization: Bearer <LIFF ID token>` — checked with LINE ([verify ID token](https://developers.line.biz/en/reference/line-login/#verify-id-token))
+  against `LINE_CHANNEL_ID`; the LINE user id becomes the user. An expired token gets `401 {"error":"token_expired"}`
+  and the app logs in again.
+- `X-User-Id: <device id>` — trusted as-is. Only accepted when `LINE_CHANNEL_ID` is empty (local development) or
+  `ALLOW_DEVICE_IDS=true`.
+
+Unknown users are created on first use.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -70,6 +78,5 @@ Uploads go to `STORAGE_DIR` locally, or Vercel Blob when `BLOB_READ_WRITE_TOKEN`
 
 ## Not done yet
 
-- `X-User-Id` is trusted as-is. Before going live, verify a LIFF ID token (`liff.getIDToken()`) against LINE and
-  derive the user from it; media URLs are unguessable UUIDs but not access-controlled.
+- Media URLs are unguessable UUIDs but not access-controlled.
 - Vercel Blob URLs are public (unguessable, but anyone with the link can open the file).

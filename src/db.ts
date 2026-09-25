@@ -9,13 +9,16 @@ export const pool = new pg.Pool({
   idleTimeoutMillis: 10_000,
 });
 
-/** Returns the internal user id for a client-supplied external id, creating the user on first sight. */
-export async function ensureUser(externalId: string): Promise<string> {
+/**
+ * Returns the internal user id for an external id (LINE user id, or a device id), creating the user on
+ * first sight. `displayName` (the LINE profile name) is kept up to date when given.
+ */
+export async function ensureUser(externalId: string, displayName?: string): Promise<string> {
   const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO users (external_id) VALUES ($1)
-     ON CONFLICT (external_id) DO UPDATE SET external_id = EXCLUDED.external_id
+    `INSERT INTO users (external_id, display_name) VALUES ($1, $2)
+     ON CONFLICT (external_id) DO UPDATE SET display_name = COALESCE(EXCLUDED.display_name, users.display_name)
      RETURNING id`,
-    [externalId],
+    [externalId, displayName ?? null],
   );
   return rows[0].id;
 }

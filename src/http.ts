@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { config } from './config.js';
 import { ensureUser } from './db.js';
+import { verifyLineToken } from './line.js';
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -8,9 +10,20 @@ export class HttpError extends Error {
 
 const USER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
-// Identity comes from the X-User-Id header (LIFF user id or device id).
-// TODO: verify a LIFF ID token instead of trusting the header once LINE login is wired up.
+/**
+ * Works out who is calling:
+ *  • `Authorization: Bearer <LIFF ID token>` — verified with LINE; the LINE user id is the identity.
+ *  • `X-User-Id: <device id>` — trusted as-is; only accepted when LINE login is off (local development)
+ *    or ALLOW_DEVICE_IDS=true.
+ */
 export async function withUser(req: Request, res: Response, next: NextFunction) {
+  const auth = req.header('authorization');
+  if (auth?.startsWith('Bearer ')) {
+    const line = await verifyLineToken(auth.slice(7).trim());
+    res.locals.userId = await ensureUser(line.sub, line.name);
+    return next();
+  }
+  if (!config.allowDeviceIds) return res.status(401).json({ error: 'login required' });
   const ext = req.header('x-user-id');
   if (!ext || !USER_ID.test(ext)) return res.status(401).json({ error: 'missing or invalid X-User-Id' });
   res.locals.userId = await ensureUser(ext);
