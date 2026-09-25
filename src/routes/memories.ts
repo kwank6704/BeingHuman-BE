@@ -24,7 +24,8 @@ const toDto = (r: Row) => ({
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024, files: 2 },
+  // Vercel functions reject request bodies over 4.5 MB, so stay under it there.
+  limits: { fileSize: (process.env.VERCEL ? 4 : 15) * 1024 * 1024, files: 2 },
 });
 
 class HttpError extends Error {
