@@ -6,6 +6,7 @@ import { pool } from './db.js';
 import { errorHandler } from './http.js';
 import { memories } from './routes/memories.js';
 import { me } from './routes/me.js';
+import { cron } from './routes/cron.js';
 
 export const app = express();
 
@@ -30,6 +31,7 @@ app.get('/health', async (_req, res) => {
 
 app.use('/api/memories', memories);
 app.use('/api/me', me);
+app.use('/api/cron', cron);
 app.use(errorHandler);
 
 export default app;

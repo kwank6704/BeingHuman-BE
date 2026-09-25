@@ -6,7 +6,8 @@
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc",
     "start": "node --env-file-if-exists=.env dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "greeting:test": "tsx --env-file-if-exists=.env scripts/send-test-greeting.ts"
   },
   "dependencies": {
     "@vercel/blob": "^2.8.0",
