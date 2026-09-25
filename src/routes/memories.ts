@@ -37,7 +37,8 @@ const upload = multer({
 
 const UUID = /^[0-9a-f-]{36}$/i;
 
-async function listFor(userId: string): Promise<Row[]> {
+/** The elder's photos (not deleted), in the order the app shows them. */
+export async function listFor(userId: string): Promise<Row[]> {
   const { rows } = await pool.query<Row>(
     `SELECT ${COLS}
        FROM memories m JOIN relations r ON r.code = m.relation

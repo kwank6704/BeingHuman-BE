@@ -10,6 +10,7 @@ const SETTINGS: Record<string, (v: unknown) => boolean> = {
   autoSpeak: v => typeof v === 'boolean',
   speechRate: v => v === 'slow' || v === 'normal',
   onboarded: v => typeof v === 'boolean',
+  morningGreeting: v => typeof v === 'boolean', // the 07:00 LINE message; on unless set to false
 };
 
 function cleanSettings(input: unknown): Record<string, unknown> {
@@ -26,7 +27,7 @@ function cleanSettings(input: unknown): Record<string, unknown> {
 const prevDay = (day: string) => new Date(Date.parse(day + 'T00:00:00Z') - 864e5).toISOString().slice(0, 10);
 
 /** Consecutive days with a visit, ending today (or yesterday, so the streak survives until the day is over). */
-async function streakFor(userId: string): Promise<{ streak: number; visitedToday: boolean }> {
+export async function streakFor(userId: string): Promise<{ streak: number; visitedToday: boolean }> {
   const { rows } = await pool.query<{ day: string }>(
     `SELECT to_char(day, 'YYYY-MM-DD') AS day FROM visits WHERE user_id = $1 ORDER BY day DESC LIMIT 400`,
     [userId],
