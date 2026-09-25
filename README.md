@@ -28,19 +28,26 @@ Every `/api` request carries `X-User-Id` (the LIFF user id, or a device id). Unk
 | GET | `/health` | | `{ ok: true }` |
 | GET | `/api/memories` | | `{ memories: Memory[] }` grouped by relation, newest first |
 | GET | `/api/memories/today` | `?date=YYYY-MM-DD` (optional) | `{ date, memories }` — 3 photos, stable for the whole day (Asia/Bangkok) |
-| POST | `/api/memories` | multipart: `image` (required), `relation`, `voice`, `voiceDurationSec` | `201 { memory }` |
-| DELETE | `/api/memories/:id` | | `204` (only the owner can delete) |
+| POST | `/api/memories` | multipart: `image` (required), `relation`, `caption`, `voice`, `voiceDurationSec` | `201 { memory }` |
+| PATCH | `/api/memories/:id` | JSON `{ relation?, caption?, favorite? }` | `{ memory }` |
+| PUT | `/api/memories/:id/voice` | multipart: `voice`, `voiceDurationSec` | `{ memory }` — replaces the old story |
+| DELETE | `/api/memories/:id` | | `204` — hidden, restorable for 7 days, then purged with its files |
+| POST | `/api/memories/:id/restore` | | `{ memory }` (undo a delete) |
+| GET | `/api/me` | | `{ nickname, settings, streak, visitedToday }` |
+| PATCH | `/api/me` | JSON `{ nickname?, settings? }` | same as GET; settings are merged and validated |
+| POST | `/api/me/visit` | | `{ streak, visitedToday }` — marks today's photos as seen |
 | GET | `/media/<key>` | | the stored photo / voice file |
 
 ```ts
 type Memory = {
-  id: string; relation: string;
+  id: string; relation: string; caption: string | null; favorite: boolean;
   imageUrl: string; voiceUrl: string | null; voiceDurationSec: number;
   createdAt: string;
 };
 ```
 
-Relations: ลูก, หลาน, คู่ชีวิต, พี่น้อง, เพื่อน, ตัวเอง, ครอบครัว. Uploads are capped at 15 MB per file.
+Relations: ลูก, หลาน, คู่ชีวิต, พี่น้อง, เพื่อน, ตัวเอง, ครอบครัว, สัตว์เลี้ยง, สถานที่.
+Settings: `textSize` normal|large|xlarge, `theme` light|dark, `autoSpeak`, `speechRate` slow|normal, `onboarded`. Uploads are capped at 15 MB per file.
 `storage/demo/` holds the seeded sample photos and is never deleted by the API.
 
 ## Not done yet

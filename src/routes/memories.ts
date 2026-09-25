@@ -1,21 +1,28 @@
-import { Router, type Request, type Response, type NextFunction } from 'express';
+import { Router, type Request } from 'express';
 import multer from 'multer';
-import { pool, ensureUser } from '../db.js';
+import { pool } from '../db.js';
+import { HttpError, withUser } from '../http.js';
 import { extFor, mediaUrl, removeFile, saveFile } from '../storage.js';
 import { pickDaily, today } from '../daily.js';
 
 type Row = {
   id: string;
   relation: string;
+  caption: string | null;
+  favorite: boolean;
   image_key: string;
   voice_key: string | null;
   voice_duration_sec: number;
   created_at: Date;
 };
 
+const COLS = 'm.id, m.relation, m.caption, m.favorite, m.image_key, m.voice_key, m.voice_duration_sec, m.created_at';
+
 const toDto = (r: Row) => ({
   id: r.id,
   relation: r.relation,
+  caption: r.caption,
+  favorite: r.favorite,
   imageUrl: mediaUrl(r.image_key)!,
   voiceUrl: mediaUrl(r.voice_key),
   voiceDurationSec: r.voice_duration_sec,
@@ -27,30 +34,38 @@ const upload = multer({
   limits: { fileSize: 15 * 1024 * 1024, files: 2 },
 });
 
-class HttpError extends Error {
-  constructor(public status: number, message: string) { super(message); }
-}
-
-const USER_ID = /^[A-Za-z0-9_-]{1,128}$/;
-
-// Identity comes from the X-User-Id header (LIFF user id or device id).
-// TODO: verify a LIFF ID token instead of trusting the header once LINE login is wired up.
-async function withUser(req: Request, res: Response, next: NextFunction) {
-  const ext = req.header('x-user-id');
-  if (!ext || !USER_ID.test(ext)) return res.status(401).json({ error: 'missing or invalid X-User-Id' });
-  res.locals.userId = await ensureUser(ext);
-  next();
-}
+const UUID = /^[0-9a-f-]{36}$/i;
 
 async function listFor(userId: string): Promise<Row[]> {
   const { rows } = await pool.query<Row>(
-    `SELECT m.id, m.relation, m.image_key, m.voice_key, m.voice_duration_sec, m.created_at
+    `SELECT ${COLS}
        FROM memories m JOIN relations r ON r.code = m.relation
-      WHERE m.user_id = $1
+      WHERE m.user_id = $1 AND m.deleted_at IS NULL
       ORDER BY r.sort_order, m.created_at DESC`,
     [userId],
   );
   return rows;
+}
+
+async function relationOrThrow(value: unknown): Promise<string> {
+  const relation = String(value || 'ครอบครัว');
+  const exists = await pool.query('SELECT 1 FROM relations WHERE code = $1', [relation]);
+  if (!exists.rowCount) throw new HttpError(400, 'unknown relation');
+  return relation;
+}
+
+/** Trimmed caption, or null when empty. */
+function captionOf(value: unknown): string | null {
+  if (value == null) return null;
+  const s = String(value).replace(/\s+/g, ' ').trim();
+  if (s.length > 80) throw new HttpError(400, 'caption is longer than 80 characters');
+  return s || null;
+}
+
+const durationOf = (value: unknown) => Math.max(0, Math.min(600, Math.round(Number(value) || 0)));
+
+function voiceOrThrow(voice: Express.Multer.File | undefined) {
+  if (voice && (!voice.mimetype.startsWith('audio/') || !extFor(voice.mimetype))) throw new HttpError(400, 'unsupported voice format');
 }
 
 export const memories = Router();
@@ -73,22 +88,21 @@ memories.post(
     const image = files?.image?.[0];
     const voice = files?.voice?.[0];
     if (!image || !image.mimetype.startsWith('image/') || !extFor(image.mimetype)) throw new HttpError(400, 'image (jpeg/png/webp/heic) is required');
-    if (voice && (!voice.mimetype.startsWith('audio/') || !extFor(voice.mimetype))) throw new HttpError(400, 'unsupported voice format');
+    voiceOrThrow(voice);
 
-    const relation = String(req.body.relation || 'ครอบครัว');
-    const exists = await pool.query('SELECT 1 FROM relations WHERE code = $1', [relation]);
-    if (!exists.rowCount) throw new HttpError(400, 'unknown relation');
-    const dur = voice ? Math.max(0, Math.min(600, Math.round(Number(req.body.voiceDurationSec) || 0))) : 0;
+    const relation = await relationOrThrow(req.body.relation);
+    const caption = captionOf(req.body.caption);
+    const dur = voice ? durationOf(req.body.voiceDurationSec) : 0;
 
     const userId: string = res.locals.userId;
     const imageKey = await saveFile(userId, image.buffer, image.mimetype);
     const voiceKey = voice ? await saveFile(userId, voice.buffer, voice.mimetype) : null;
     try {
       const { rows } = await pool.query<Row>(
-        `INSERT INTO memories (user_id, relation, image_key, image_mime, voice_key, voice_mime, voice_duration_sec)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, relation, image_key, voice_key, voice_duration_sec, created_at`,
-        [userId, relation, imageKey, image.mimetype, voiceKey, voice ? voice.mimetype : null, dur],
+        `INSERT INTO memories AS m (user_id, relation, caption, image_key, image_mime, voice_key, voice_mime, voice_duration_sec)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING ${COLS}`,
+        [userId, relation, caption, imageKey, image.mimetype, voiceKey, voice ? voice.mimetype : null, dur],
       );
       res.status(201).json({ memory: toDto(rows[0]) });
     } catch (e) {
@@ -98,20 +112,83 @@ memories.post(
   },
 );
 
-memories.delete('/:id', async (req, res) => {
-  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new HttpError(404, 'not found');
-  const { rows } = await pool.query<Pick<Row, 'image_key' | 'voice_key'>>(
-    'DELETE FROM memories WHERE id = $1 AND user_id = $2 RETURNING image_key, voice_key',
-    [req.params.id, res.locals.userId],
+/** Change who is in the photo, its name, or whether it is a favourite. */
+memories.patch('/:id', async (req, res) => {
+  if (!UUID.test(req.params.id)) throw new HttpError(404, 'not found');
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const sets: string[] = [];
+  const vals: unknown[] = [req.params.id, res.locals.userId];
+  if ('relation' in body) { vals.push(await relationOrThrow(body.relation)); sets.push(`relation = $${vals.length}`); }
+  if ('caption' in body) { vals.push(captionOf(body.caption)); sets.push(`caption = $${vals.length}`); }
+  if ('favorite' in body) { vals.push(body.favorite === true); sets.push(`favorite = $${vals.length}`); }
+  if (!sets.length) throw new HttpError(400, 'nothing to update');
+
+  const { rows } = await pool.query<Row>(
+    `UPDATE memories m SET ${sets.join(', ')}
+      WHERE m.id = $1 AND m.user_id = $2 AND m.deleted_at IS NULL
+      RETURNING ${COLS}`,
+    vals,
   );
   if (!rows.length) throw new HttpError(404, 'not found');
-  await Promise.all([removeFile(rows[0].image_key), removeFile(rows[0].voice_key)]);
+  res.json({ memory: toDto(rows[0]) });
+});
+
+/** Record (or re-record) the story of a photo that is already in the book. */
+memories.put('/:id/voice', upload.single('voice'), async (req: Request<{ id: string }>, res) => {
+  if (!UUID.test(req.params.id)) throw new HttpError(404, 'not found');
+  const voice = req.file;
+  if (!voice) throw new HttpError(400, 'voice is required');
+  voiceOrThrow(voice);
+
+  const userId: string = res.locals.userId;
+  const { rows: old } = await pool.query<{ voice_key: string | null }>(
+    'SELECT voice_key FROM memories WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+    [req.params.id, userId],
+  );
+  if (!old.length) throw new HttpError(404, 'not found');
+
+  const voiceKey = await saveFile(userId, voice.buffer, voice.mimetype);
+  const { rows } = await pool.query<Row>(
+    `UPDATE memories m SET voice_key = $3, voice_mime = $4, voice_duration_sec = $5
+      WHERE m.id = $1 AND m.user_id = $2
+      RETURNING ${COLS}`,
+    [req.params.id, userId, voiceKey, voice.mimetype, durationOf(req.body.voiceDurationSec)],
+  );
+  await removeFile(old[0].voice_key);
+  res.json({ memory: toDto(rows[0]) });
+});
+
+// Deleting only hides the photo, so the elder can take it back ("เอาคืน").
+// Files are removed for good by purgeDeleted() once the grace period is over.
+memories.delete('/:id', async (req, res) => {
+  if (!UUID.test(req.params.id)) throw new HttpError(404, 'not found');
+  const { rowCount } = await pool.query(
+    'UPDATE memories SET deleted_at = now() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+    [req.params.id, res.locals.userId],
+  );
+  if (!rowCount) throw new HttpError(404, 'not found');
   res.status(204).end();
 });
 
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
-  if (err instanceof multer.MulterError) return res.status(413).json({ error: err.message });
-  console.error(err);
-  res.status(500).json({ error: 'internal error' });
+memories.post('/:id/restore', async (req, res) => {
+  if (!UUID.test(req.params.id)) throw new HttpError(404, 'not found');
+  const { rows } = await pool.query<Row>(
+    `UPDATE memories m SET deleted_at = NULL
+      WHERE m.id = $1 AND m.user_id = $2 AND m.deleted_at IS NOT NULL
+      RETURNING ${COLS}`,
+    [req.params.id, res.locals.userId],
+  );
+  if (!rows.length) throw new HttpError(404, 'not found');
+  res.json({ memory: toDto(rows[0]) });
+});
+
+/** Permanently removes memories deleted more than `days` ago, with their files. */
+export async function purgeDeleted(days = 7): Promise<number> {
+  const { rows } = await pool.query<Pick<Row, 'image_key' | 'voice_key'>>(
+    `DELETE FROM memories WHERE deleted_at < now() - make_interval(days => $1)
+     RETURNING image_key, voice_key`,
+    [days],
+  );
+  await Promise.all(rows.flatMap(r => [removeFile(r.image_key), removeFile(r.voice_key)]));
+  return rows.length;
 }
